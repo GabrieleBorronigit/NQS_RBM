@@ -1,0 +1,24 @@
+nv          1331
+nh          10
+sigma       0.001
+loadtype    0,1,2,3
+restartfn   file contenente i pesi
+model       Coulomb3d
+M           2
+spin_up     2
+spin_down   0
+seed        -1 (random)
+printstates 1
+filestates  test.dat
+nsweeps     5000
+niter       1000
+get_pars    quando prendere i pesi
+Nprotons    Z (protoni nel nucleo)
+traplength  4.0
+isospin     0 atomi 1 nuclei
+iso_up      1
+iso_down    1
+eta         0.04
+eta1        50
+label 	    file dei pesi sarà weights+label
+trainingfn  Dove stampare file di training
