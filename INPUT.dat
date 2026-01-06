@@ -1,24 +1,24 @@
-nv          1331
-nh          10
-sigma       0.001
-loadtype    0,1,2,3
-restartfn   file contenente i pesi
-model       Coulomb3d
-M           2
-spin_up     2
-spin_down   0
+nv          number of visible units=lattice sites (1331 for atoms)
+nh          number of hidden units
+sigma       0.001 std deviation for gaussian initializer for rbm weights
+loadtype    0,1,2,3 0:random weights 1: visible from file, random hidden, 2: all weights loaded from file, 3: all weights loaded from file+ random hidden 
+restartfn   file containing weights
+model       Coulomb3d/ArgonneV6 atoms/nuclei
+M            number of particles
+spin_up     spin up particles
+spin_down   spin down
 seed        -1 (random)
-printstates 1
-filestates  test.dat
-nsweeps     5000
-niter       1000
-get_pars    quando prendere i pesi
-Nprotons    Z (protoni nel nucleo)
-traplength  4.0
-isospin     0 atomi 1 nuclei
-iso_up      1
-iso_down    1
-eta         0.04
-eta1        50
-label 	    file dei pesi sarà weights+label
-trainingfn  Dove stampare file di training
+printstates 1 print sampled configurations on file if true
+filestates  test.dat test (useless)
+nsweeps     5000 number of MC sweeps per itereations in the metropolis algorithm
+niter       1000 nuber of epochs
+get_pars    save rbm's weight on file every get_pars iterations
+Nprotons    Z (protons in the nucleus for atoms)
+traplength  4.0 physical length of the trap , a_0 for atoms, fm for nuclei
+isospin     0 atoms 1 nuclei
+iso_up      1 number of isospin up particles (protons)
+iso_down    1 number of isospin down particles (neutrons)
+eta         0.04 starting learning rate
+eta1        50 learning rate decay
+label 	    name of weights file will be weights+label.dat
+trainingfn  name of the output training file containing energy and error for every epoch
