@@ -1,11 +1,13 @@
 #include "mpi.h" // Include per MPI
 #include "src/nqs_preopt.hh"
+#include "src/CGFAC.cc"
+#include "src/VariationalCG.cc"
+#include "src/ArgonneV6Lattice.cc"
 #include <getopt.h>
 #include <iostream>
 #include <map>
 #include <sstream>
 #include <string>
-
 int main(int argc, char *argv[]) {
   MPI_Init(&argc, &argv); // Inizializza MPI
 
@@ -13,13 +15,15 @@ int main(int argc, char *argv[]) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank); // Ottiene il rank del processo
   MPI_Comm_size(MPI_COMM_WORLD, &size); // Ottiene il numero totale di processi
 
-  auto opts = ReadOptionsFromFile("INPUT.dat");
+  auto opts = ReadOptionsFromFile("INPUTH2_CG.dat");
   // bool isospin=std::get<bool>(opts["isospin"]);
   bool isospin = std::get<bool>(opts["isospin"]);
 
   int isoUp = std::get<int>(opts["iso_up"]);
   int isoDown = std::get<int>(opts["iso_down"]);
-
+  if(rank==0){
+std::cout<<"running on "<<size<<"nodes"<<std::endl;
+  }
   // Definining the neural-network wave-function
   int loadtype = std::get<int>(opts["loadtype"]);
   // 0:random params, 1: random nh, 2: all loaded parameters, 3: loaded+ new
@@ -115,7 +119,6 @@ int main(int argc, char *argv[]) {
 
       double eta = std::get<double>(opts["eta"]);
       double eta1 = std::get<double>(opts["eta1"]);
-      SR opt(eta, eta1);
       int Niter = std::get<int>(opts["niter"]);
 
       int get_pars = std::get<int>(opts["get_pars"]);
@@ -126,13 +129,103 @@ int main(int argc, char *argv[]) {
       //wavef.InitLt(sampler.GetState());
       // sampler.Sample(10);
       std::string label=std::get<std::string>(opts["label"]);
-    
-      Variational<ArgonneV6, Nqs, SamplerH2, SR> var(sampler, opt);
-    var.RunTrainingSR(nsweeps / size, Niter, loadtype,  get_pars, label);
+    std::string trainingfn=std::get<std::string>(opts["trainingfn"]);
+
+      // scelta dell'ottimizzatore: "cg" usa VariationalCG + CGFAC (gradiente
+      // naturale risolto col gradiente coniugato), altrimenti SGD.
+      // selezione da INPUTH2.dat (chiave "optimizer"), con override da
+      // riga di comando:  ./optH2 cg
+      std::string optimizer = "sgd";
+      if (opts.count("optimizer"))
+        optimizer = std::get<std::string>(opts["optimizer"]);
+      if (argc > 1)
+        optimizer = argv[1];
+      double cg_lambda = opts.count("cg_lambda")
+                             ? std::get<double>(opts["cg_lambda"]) : 0.01;
+      double cg_rtol = opts.count("cg_rtol")
+                           ? std::get<double>(opts["cg_rtol"]) : 1e-4;
+      int cg_maxiter = opts.count("cg_maxiter")
+                           ? std::get<int>(opts["cg_maxiter"]) : 50;
+      double cg_maxstep = opts.count("cg_maxstep")
+                              ? std::get<double>(opts["cg_maxstep"]) : 0.1;
+
+      if (optimizer == "cg") {
+        if (rank == 0)
+          std::cout << "# Optimizer: CG-SR  lambda_rel=" << cg_lambda
+                    << " rtol=" << cg_rtol << " maxiter=" << cg_maxiter
+                    << " maxstep=" << cg_maxstep << std::endl;
+        CGFAC opt(eta, eta1);
+        VariationalCG<ArgonneV6, Nqs, SamplerH2, CGFAC> var(sampler, opt);
+        var.RunTrainingCG(nsweeps / size, Niter, loadtype, get_pars, trainingfn,
+                          label, cg_lambda, cg_rtol, cg_maxiter, cg_maxstep);
+      } else {
+        if (rank == 0)
+          std::cout << "# Optimizer: SGD" << std::endl;
+        Sgd opt(eta, eta1);
+        Variational<ArgonneV6, Nqs, SamplerH2, Sgd> var(sampler, opt);
+        var.RunTraining(nsweeps / size, Niter, loadtype, get_pars, label,
+                        trainingfn);
+      }
       // var.RunTraining(5, 5, loadtype, get_pars);s
         //double acc=sampler.Acceptance();
     //  std::cout<<"acceptance="<<acc<<std::endl;
 
+    }
+
+    else if (model == "ArgonneV6Lattice") {
+      // Potenziale AV6' smussato (regolatore gaussiano, larghezza
+      // smear_b_factor*dx) e ricalibrato per riprodurre -2.2246 MeV su
+      // QUESTO reticolo (vedi src/ArgonneV6Lattice.cc). La calibrazione
+      // avviene una sola volta, qui nel costruttore.
+      double smear_b_factor = opts.count("smear_b_factor")
+                                   ? std::get<double>(opts["smear_b_factor"])
+                                   : 1.0;
+      ArgonneV6Lattice hamiltonian(nspins, magnetization,
+                                   std::get<double>(opts["traplength"]),
+                                   std::get<double>(opts["Nprotons"]),
+                                   197.327053, (938.27231 + 939.56563) / 2,
+                                   smear_b_factor);
+      typedef SamplerH2<Nqs, ArgonneV6Lattice> SamplerH2;
+      SamplerH2 sampler(wavef, hamiltonian, seed, Nup, Ndown, isoUp, isoDown);
+
+      double eta = std::get<double>(opts["eta"]);
+      double eta1 = std::get<double>(opts["eta1"]);
+      int Niter = std::get<int>(opts["niter"]);
+      int get_pars = std::get<int>(opts["get_pars"]);
+      std::string label = std::get<std::string>(opts["label"]);
+      std::string trainingfn = std::get<std::string>(opts["trainingfn"]);
+
+      std::string optimizer = "sgd";
+      if (opts.count("optimizer"))
+        optimizer = std::get<std::string>(opts["optimizer"]);
+      if (argc > 1)
+        optimizer = argv[1];
+      double cg_lambda = opts.count("cg_lambda")
+                             ? std::get<double>(opts["cg_lambda"]) : 0.01;
+      double cg_rtol = opts.count("cg_rtol")
+                           ? std::get<double>(opts["cg_rtol"]) : 1e-4;
+      int cg_maxiter = opts.count("cg_maxiter")
+                           ? std::get<int>(opts["cg_maxiter"]) : 50;
+      double cg_maxstep = opts.count("cg_maxstep")
+                              ? std::get<double>(opts["cg_maxstep"]) : 0.1;
+
+      if (optimizer == "cg") {
+        if (rank == 0)
+          std::cout << "# Optimizer: CG-SR  lambda_rel=" << cg_lambda
+                    << " rtol=" << cg_rtol << " maxiter=" << cg_maxiter
+                    << " maxstep=" << cg_maxstep << std::endl;
+        CGFAC opt(eta, eta1);
+        VariationalCG<ArgonneV6Lattice, Nqs, SamplerH2, CGFAC> var(sampler, opt);
+        var.RunTrainingCG(nsweeps / size, Niter, loadtype, get_pars, trainingfn,
+                          label, cg_lambda, cg_rtol, cg_maxiter, cg_maxstep);
+      } else {
+        if (rank == 0)
+          std::cout << "# Optimizer: SGD" << std::endl;
+        Sgd opt(eta, eta1);
+        Variational<ArgonneV6Lattice, Nqs, SamplerH2, Sgd> var(sampler, opt);
+        var.RunTraining(nsweeps / size, Niter, loadtype, get_pars, label,
+                        trainingfn);
+      }
     }
 
     else {

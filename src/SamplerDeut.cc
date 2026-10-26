@@ -92,6 +92,10 @@ template <class Wf, class Hamiltonian> class SamplerH2 {
   double accept_;
   double nmoves_;
   double MetroRatio_;
+  // mosse Metropolis per sweep. Se <=0 usa il default nspins_*sweepfactor
+  // (= l^3*sf). Per un sistema a 2 corpi diluito e' overkill: la decorrelazione
+  // scala come la diffusione nella box (~l^2), non col volume (l^3).
+  int movesOverride_ = -1;
 
   // container for indices of randomly chosen spins to be flipped
   std::vector<int> flips_;
@@ -119,8 +123,18 @@ template <class Wf, class Hamiltonian> class SamplerH2 {
   std::vector<std::vector<int>> stateIndexHistory_;
   std::vector<std::vector<int>> stateHistory_;
 
-  // storage for sampled logarithmic derivatives
+  // storage for sampled logarithmic derivatives (usato solo se storeFull_)
   std::vector<std::vector<std::complex<double>>> derLogs_;
+  // accumulatori on-the-fly per il gradiente SGD: evitano di tenere in memoria
+  // l'intera matrice nsweeps x npar (che a nh=50, l=9 sono gia' ~GB per rank).
+  //   sumDer_[j]  = sum_k  O_k[j]
+  //   sumEDer_[j] = sum_k  Re(E_k) O_k[j]
+  // con O_k = DerLog(stato k). Il gradiente si ricostruisce esattamente:
+  //   grad[j] = 2/N ( conj(sumEDer_[j]) - <E> conj(sumDer_[j]) )
+  std::vector<std::complex<double>> sumDer_;
+  std::vector<std::complex<double>> sumEDer_;
+  long nAccum_ = 0;
+  bool storeFull_ = false; // true solo per il pretraining (serve per-campione)
   int nv_;
   int l_; // lunghezza del lato della box
   // accumulator for mean nucleon-nucleon radius (local to this MPI rank)
@@ -319,7 +333,7 @@ public:
     double acceptance = 0;
     // a volte non muovo ma inverto gli spin, a volte gli isospin
 
-    if (r <= 0.1) {
+    if (r <= 0.2) {
       move = FlipRandomSpin();
       // std::cout<<"proposto flip degli spin"<<std::endl;
       //  std::cout<<"calcolando accettanza..."<<std::endl;
@@ -327,7 +341,7 @@ public:
       // std::cout<<"accettanza calcolata..."<<std::endl;
     }
 
-    else if (r > 0.10 && r <= 0.2) {
+    else if (r > 0.20 && r <= 0.4) {
       move = FlipPNH2();
       if (move.empty()) {
         // proposta identica allo stato corrente: non contare la mossa
@@ -783,15 +797,26 @@ std::sort(SpinIndex.All.begin(), SpinIndex.All.end());
   }
 
   void CalcDerlogs() {
-    // std::cout << "DEBUG: Chiamo DerLog con state_.size() = " << state_.size()
-    //          << std::endl;
+    auto O = wf_.DerLog(state_);
+    const int npar = O.size();
+    // energia locale dell'ultimo campione (parte reale, come in Variational)
+    // E_loc COMPLESSA: per parametri olomorfi il gradiente e' <O* (E_loc-<E>)>
+    // e scartare Im(E_loc) rimuove una componente reale del gradiente.
+    const std::complex<double> e = energy_.back();
 
-    auto derlog_temp = wf_.DerLog(state_); // forza copia temporanea
-    derLogs_.push_back(derlog_temp);       // copia vera, non alias
+    if (sumDer_.empty()) {
+      sumDer_.assign(npar, {0., 0.});
+      sumEDer_.assign(npar, {0., 0.});
+    }
+    for (int j = 0; j < npar; ++j) {
+      sumDer_[j] += O[j];
+      sumEDer_[j] += e * std::conj(O[j]);
+    }
+    ++nAccum_;
 
-    // matrice che contiene tutte i vettori derlogs per ogni stato
-    // std::cout << "DEBUG: Chiamo DerLog con derlog_.size() = " <<
-    // derLogs_.size()           << std::endl;
+    // per il pretraining serve la matrice completa per-campione
+    if (storeFull_)
+      derLogs_.push_back(std::move(O));
   }
 
   // Run the Monte Carlo sampling
@@ -908,6 +933,9 @@ std::sort(SpinIndex.All.begin(), SpinIndex.All.end());
     stateIndexHistory_.clear();
     energy_.clear();
     derLogs_.clear();
+    sumDer_.clear();
+    sumEDer_.clear();
+    nAccum_ = 0;
     // SpinIndex.All.clear();
     // SpinIndex.Up.clear();
     // SpinIndex.Down.clear();
@@ -918,8 +946,12 @@ std::sort(SpinIndex.All.begin(), SpinIndex.All.end());
     wf_.InitLt(state_); // inizializza lookup tables(somme sui nodi nascosti)
 
     ResetAv(); // azzera accumulatori di accettanza metropolis
-    // int movesPerMCStep = 320; //
-    int movesPerMCStep = nspins_ * sweepfactor;
+    // Default: l^2*sweepfactor. Per un deutone (2 corpi) la decorrelazione
+    // scala come la diffusione nella box (~l^2), non col volume (l^3): validato
+    // a pesi fissi, stessa <E> e stesso tau (~0.5 sweep) di l^3, con l x meno
+    // lavoro. movesOverride_>0 forza un valore (es. l^3 per confronto).
+    int movesPerMCStep =
+        (movesOverride_ > 0) ? movesOverride_ : l_ * l_ * sweepfactor;
 
     // thermalization
 
@@ -944,9 +976,9 @@ std::sort(SpinIndex.All.begin(), SpinIndex.All.end());
                         // degli spin, magnetizzazione, accettanza
         }
       }
-      RecordPosition(); // salva lo stato corrende del reticolo nei vettori di
-                        // history
-      // std::cout<<"prima di measure energy so vivo"<<std::endl;
+      if (storeFull_)
+        RecordPosition(); // history dei campioni: serve solo al pretraining,
+                          // in training e' peso morto (nsweeps x 4nv int)
       MeasureEnergy(); // calcola Eloc (da aggiornare per i nuclei!!)
       // std::cout << "DEBUG: indirizzo flipsh_[0] = " << &flipsh_[0] <<
       // std::endl;
@@ -976,6 +1008,16 @@ std::sort(SpinIndex.All.begin(), SpinIndex.All.end());
   }
 
   std::vector<std::complex<double>> GetSamplingEnergies() { return energy_; }
+
+  // accumulatori del gradiente (ritorno per riferimento: nessuna copia)
+  const std::vector<std::complex<double>> &GetSumDer() const { return sumDer_; }
+  const std::vector<std::complex<double>> &GetSumEDer() const {
+    return sumEDer_;
+  }
+  long GetNAccum() const { return nAccum_; }
+  void SetStoreFull(bool b) { storeFull_ = b; } // attivato dal pretraining
+  void SetMovesPerSweep(int m) { movesOverride_ = m; } // <=0 => default l^3*sf
+  int GetL() const { return l_; }
 
   std::vector<std::vector<std::complex<double>>> GetDerLogs() const {
     return derLogs_;

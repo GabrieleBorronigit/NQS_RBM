@@ -1,29 +1,8 @@
-/*
-############################ COPYRIGHT NOTICE ##################################
+#pragma once
 
-Code provided by L.Lazzarino, written by L.Lazzarino , October 2021.
-
-Permission is granted for anyone to copy, use, modify, or distribute the
-accompanying programs and documents for any purpose, provided this copyright
-notice is retained and prominently displayed, along with a complete citation of
-the published version of the paper:
- ______________________________________________________________________________
-| L.Lazzarino                                                                  |
-| Solving the quantum many-body problem with artificial neural-networks        |
-|______________________________________________________________________________|
-
-The programs and documents are distributed without any warranty, express or
-implied.
-
-These programs were written for research purposes only, and are meant to
-demonstrate and reproduce the main results obtained in the paper.
-
-All use of these programs is entirely at the user's own risk.
-
-################################################################################
-*/
-
-#include "eigen3/Eigen/Dense"
+#include <Eigen/Dense>
+#include "mpi.h"
+#include <algorithm>
 #include <complex>
 #include <iostream>
 #include <vector>
@@ -52,6 +31,7 @@ class ArgonneV6 {
   const double hbar_;
   const double mass_;
   double KEconst_;
+  double KErel_; // elemento di matrice cinetico della coordinata relativa
 
   // pre-computed quantities
   std::vector<std::complex<double>> mel_;
@@ -75,18 +55,31 @@ class ArgonneV6 {
   std::vector<Eigen::Matrix2cd> sigma_;
 
 public:
+  // true solo sul rank 0 (o se MPI non e' inizializzato: test standalone)
+  static bool IsMaster() {
+    int flag = 0;
+    MPI_Initialized(&flag);
+    if (!flag)
+      return true;
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    return rank == 0;
+  }
+
   ArgonneV6(int nspins, int Mag, double traplength = 4., double alpha_ne = -2.0,
             double hbar = hc, double mass = (mp + mn) / 2)
       : nspins_(nspins), Mag_(Mag), traplength_(traplength), alpha_ne(alpha_ne),
         hbar_(hbar), mass_(mass) {
-    std::cout << "hbar=hc=" << hbar << "\t mass=" << mass << std::endl;
-    connectedcomponents_ =
-        1 + 6 * Mag_; // devo mettere hbar e mass per calcolare bene l energia
-                      // cinetica? penso di si
+    if (IsMaster())
+      std::cout << "hbar=hc=" << hbar << "\t mass=" << mass << std::endl;
+    // COM fisso: la cinetica e' quella della sola coordinata relativa ->
+    // 1 termine diagonale + 2*dim_ hop appaiati a specchio
+    connectedcomponents_ = 1 + 2 * dim_;
 
     l_ = cbrt(nspins_); // lato= radice cubica del numero di spin("volume")
     dx_ = traplength_ / l_;
-    std::cout << "dx=" << dx_ << std::endl;
+    if (IsMaster())
+      std::cout << "dx=" << dx_ << std::endl;
     KEconst_ = -std::pow(hbar_, 2) / (2 * mass_ * std::pow(dx_, 2));
     // KEconst_=0.0;
     InitLattice();
@@ -94,6 +87,7 @@ public:
     InitPauli();        // crea matrici di pauli
     SpincouplingInit(); // salva la matrice di accoppiamento degli spin
   }
+  virtual ~ArgonneV6() {}
   double spincoupling(int bra, int ket) { return spincoupling_(bra, ket); }
   void InitLattice() {
     if ((l_ * l_ * l_) != nspins_) {
@@ -111,34 +105,34 @@ public:
 
   void Init() { // parte indep dalla configurazione
 
-    alpha_ne = -2.; // coupling constant Vn-e (numero di protoni nel nucleo)
+    alpha_ne = -2.; // coupling constant Vn-e (numero di protoni nel nucleo) serve solo per gli atomi
     alpha_ee = 1.;
     COM = (l_ * l_ * l_ - 1) / 2.; // vero se dispari
 
     mel_.resize(connectedcomponents_);
     flipsh_.resize(connectedcomponents_);
 
-    // no spins flipped = no particle moves:
-    mel_[0] =
-        KEconst_ * (-2) * dim_ * Mag_; // dim_== dof, laplaciano discreto dell
-    std::cout << "mel_[0]=" << mel_[0] << std::endl;
-    // energia cinetica= -2*dim per ogni particella. mel[0] ha la traccia di T
-    // per tutte le particelle
-    std::cout << "dx_ = " << dx_ << " fm, KEconst_ = " << KEconst_ << " MeV"
-              << std::endl;
+    // COM fisso: problema a un corpo nella coordinata relativa r = r_p - r_n,
+    // massa ridotta mu = m/2 e passo relativo 2*dx (un hop appaiato a specchio
+    // sposta r di due siti): -hbar^2/(2*mu*(2dx)^2) = KEconst_/2
+    KErel_ = 0.5 * KEconst_;
 
-    std::cout << "-----------Keconst=" << KEconst_ << "--------------"
-              << std::endl;
+    // nessun flip = nessun movimento: diagonale del laplaciano discreto in r
+    mel_[0] = KErel_ * (-2) * dim_;
     flipsh_[0] = std::vector<int>();
-    std::cout << "Kinetic only: " << KEconst_ * (-2) * dim_ * Mag_ << std::endl;
+    if (IsMaster()) {
+      std::cout << "dx_ = " << dx_ << " fm, KEconst_ = " << KEconst_
+                << " MeV, KErel_ = " << KErel_ << " MeV" << std::endl;
+      std::cout << "Kinetic diagonal: " << mel_[0] << std::endl;
+    }
 
     for (int i = 1; i < connectedcomponents_; i++) {
-      mel_[i] = KEconst_ * (1); // termini offdiagonal di T, quelli accessibili
-                                // con un salto della particella
+      mel_[i] = KErel_; // hop appaiati a specchio della coordinata relativa
     }
-    std::cout << "# Deuteron in a box (" << l_ << "x" << l_ << "x" << l_
-              << ") and COM in " << "(" << int(int(COM / l_) / l_) << ","
-              << int(COM / l_) % l_ << "," << COM % l_ << ")" << std::endl;
+    if (IsMaster())
+      std::cout << "# Deuteron in a box (" << l_ << "x" << l_ << "x" << l_
+                << ") and COM in " << "(" << int(int(COM / l_) / l_) << ","
+                << int(COM / l_) % l_ << "," << COM % l_ << ")" << std::endl;
   }
 
   int MinFlips() const { // mantains magnetization
@@ -284,69 +278,35 @@ public:
     flipsh.resize(connectedcomponents_);
 
     // double rab_special = std::sqrt(3.0 / 16.0) *   dx_; // distanza minima
-    // tra due particles nel reticolo
+    // tra due particles nel reticolo (solo per atomi)
     double rab_special = 0.0;
 
     // dentro init comincia gia a calcolare alcuni elementi di matrice
-    // (diagonali dell energia cinetica e quelli offdiagonal) li copio
-    nn_.resize(Mag_);
+    // (diagonale dell energia cinetica e hop) li copio
     mel = mel_;
     flipsh = flipsh_;
-    //  std::cout<<"mel[0]="<<mel[0]<<std::endl;
+
+    // Cinetica della coordinata relativa: hop appaiati a specchio.
+    // Il protone salta in direzione d e il neutrone nella direzione opposta,
+    // il COM resta invariato. il salto viene automaticamente scartato se uno dei due uscirebbe dalla box e
+    // per simmetria speculare i due rigetti avvengono sempre in coppia.
+    std::vector<int> nnP = FindNeighboursGlobal(SpinIndexAll[0], nv);
+    std::vector<int> nnN = FindNeighboursGlobal(SpinIndexAll[1], nv);
     int index = 1;
-
-    // 1) Vicini GLOBALI "raw" (solo bordi, NO occupazione) + diagonale T
-    std::vector<std::vector<int>> nn_raw(Mag_);
-    for (int p = 0; p < Mag_; ++p) {
-      nn_raw[p] = FindNeighboursGlobal(SpinIndexAll[p], nv); // 6 vicini
-
-      // conta SOLO i bordi "positivi": +x,+y,+z  → indici 1,3,5 in
-      // FindNeighbours
-      int missing_pos = 0;
-      if (nn_raw[p][1] < 0)
-        ++missing_pos; // +x  (I: s + l_*l_)
-      if (nn_raw[p][3] < 0)
-        ++missing_pos; // +y  (V: s + l_)
-      if (nn_raw[p][5] < 0)
-        ++missing_pos; // +z  (H: s + 1)
-
-      // aggiorna UNA VOLTA per particella, non dentro il for(d)
-      mel[0] += KEconst_ * (-missing_pos);
-    }
-
-    // filtro l’OCCUPAZIONE sul canale giusto, partendo da nn_raw
-    for (int p = 0; p < Mag_; ++p) {
-      nn_[p] = nn_raw[p];
-      if (SpinIndexAll[p] < nv ||
-          (SpinIndexAll[p] >= 2 * nv && SpinIndexAll[p] < 3 * nv)) {
-        for (int j = 0; j < (int)nn_[p].size(); ++j)
-          for (int k = 0; k < Nup; ++k)
-            if (nn_[p][j] == SpinIndexAll[k])
-              nn_[p][j] = -1;
+    for (int d = 0; d < 2 * dim_; ++d) {
+      int dmir = (d % 2 == 0) ? d + 1 : d - 1; // direzione opposta
+      if (nnP[d] >= 0 && nnN[dmir] >= 0) {
+        flipsh[index] = {SpinIndexAll[0], nnP[d], SpinIndexAll[1], nnN[dmir]};
+        mel[index] = KErel_;
       } else {
-        for (int j = 0; j < (int)nn_[p].size(); ++j)
-          for (int k = Nup; k < Mag_; ++k)
-            if (nn_[p][j] == SpinIndexAll[k])
-              nn_[p][j] = -1;
+        flipsh[index].clear();
+        mel[index] = 0.0;
       }
+      ++index;
     }
 
-    //  OFF-DIAG cinetici 1..6*Mag: KEconst oppure 0
-    for (int p = 0; p < Mag_; ++p) {
-      for (int j = 0; j < (int)nn_[p].size(); ++j) {
-        if (nn_[p][j] >= 0) {
-          flipsh[index] = {SpinIndexAll[p], nn_[p][j]};
-          mel[index] = KEconst_;
-        } else {
-          flipsh[index].clear();
-          mel[index] = 0.0;
-        }
-        ++index;
-      }
-    }
-
-    if (index != 1 + 6 * Mag_) {
-      std::cerr << "❌ index=" << index << " atteso=" << 1 + 6 * Mag_ << "\n";
+    if (index != 1 + 2 * dim_) {
+      std::cerr << "❌ index=" << index << " atteso=" << 1 + 2 * dim_ << "\n";
       std::exit(1);
     }
 
@@ -396,6 +356,30 @@ public:
       }
     }
 
+    // Aggiunge un termine off-diagonal gestendo il caso degenere in cui i due
+    // nucleoni occupano lo stesso sito spaziale: un sito che compare due volte
+    // nella lista viene flippato due volte, quindi si cancella. Se la lista si
+    // svuota lo stato d'arrivo coincide con quello di partenza e il contributo
+    // e' diagonale. (LogPoP non e' idempotente sui flip ripetuti: passarglieli
+    // corromperebbe E_loc.)
+    auto PushTerm = [&flipsh, &mel](const std::vector<int> &fl_raw,
+                                    std::complex<double> v) {
+      std::vector<int> fl;
+      for (int s : fl_raw) {
+        auto it = std::find(fl.begin(), fl.end(), s);
+        if (it != fl.end())
+          fl.erase(it);
+        else
+          fl.push_back(s);
+      }
+      if (fl.empty()) {
+        mel[0] += v; // identita': termine diagonale
+      } else {
+        flipsh.push_back(fl);
+        mel.push_back(v);
+      }
+    };
+
     // deuterio = isospin opposti
     int t1, t2, t4;
     // spinindexall è ordinato, nel primo posto cie sempre un protone e nel
@@ -425,35 +409,40 @@ public:
           // ("<<s3<<","<<t3<<")"<<std::endl;
           // std::cout<<"("<<s2<<","<<t2<<")" <<"to -->
           // ("<<s4<<","<<t4<<")"<<std::endl;
-          std::complex<double> Vij;
-          std::complex<double> V1 = V_i[0] + V_i[1] * spincoupling_(braS, ketS);
-          if (!std::isfinite(std::real(V1)) || !std::isfinite(std::imag(V1))) {
-            std::cerr << "⚠️ NaN in V1, rab=" << rab << std::endl;
-            Vij = {0.0, 0.0};
-          }
-          std::complex<double> V2 = V_i[2] * spincoupling_(braT, ketT);
-          if (!std::isfinite(std::real(V2)) || !std::isfinite(std::imag(V2))) {
-            std::cerr << "⚠️ NaN in V2, rab=" << rab << std::endl;
-            Vij = {0.0, 0.0};
-          }
-          std::complex<double> V3 =
-              V_i[3] * spincoupling_(braS, ketS) * spincoupling_(braT, ketT);
-          if (!std::isfinite(std::real(V3)) || !std::isfinite(std::imag(V3))) {
-            std::cerr << "⚠️ NaN in V3, rab=" << rab << std::endl;
-            Vij = {0.0, 0.0};
-          }
-          std::complex<double> V4 = V_i[4] * S12(braS, ketS);
-          if (!std::isfinite(std::real(V4)) || !std::isfinite(std::imag(V4))) {
-            std::cerr << "⚠️ NaN in V4, rab=" << rab << std::endl;
-            Vij = {0.0, 0.0};
-          }
-          std::complex<double> V5 =
+          // ATTENZIONE all'ordine degli operatori Argonne (av18pot.f):
+          // vnn[0]=1, vnn[1]=tau.tau, vnn[2]=sigma.sigma, vnn[3]=(ss)(tt),
+          // vnn[4]=S12, vnn[5]=S12(tt). Lo SPIN e' V_i[2], l'ISOSPIN V_i[1].
+          //
+          // Ogni operatore che agisce su UN solo spazio porta l'identita'
+          // sull'altro: il suo elemento di matrice contiene la delta
+          // sull'altro spazio. Senza le delta, termini come vc o vt*S12
+          // finivano anche sui ket con isospin cambiato (dove l'overlap
+          // <pn|np>=0 li annulla), generando off-diagonal spuri enormi.
+          const double dS = (ketS == braS) ? 1.0 : 0.0;
+          const double dT = (ketT == braT) ? 1.0 : 0.0;
+          std::complex<double> Vij =
+              V_i[0] * dS * dT +
+              V_i[2] * spincoupling_(braS, ketS) * dT +
+              V_i[1] * spincoupling_(braT, ketT) * dS +
+              V_i[3] * spincoupling_(braS, ketS) * spincoupling_(braT, ketT) +
+              V_i[4] * S12(braS, ketS) * dT +
               V_i[5] * S12(braS, ketS) * spincoupling_(braT, ketT);
-          if (!std::isfinite(std::real(V5)) || !std::isfinite(std::imag(V5))) {
-            std::cerr << "⚠️ NaN in V5, rab=" << rab << std::endl;
+          if (!std::isfinite(std::real(Vij)) ||
+              !std::isfinite(std::imag(Vij))) {
+            std::cerr << "⚠️ NaN in Vij, rab=" << rab << std::endl;
             Vij = {0.0, 0.0};
           }
-          Vij = V1 + V2 + V3 + V4 + V5;
+
+          // Segno di scambio fermionico: nella base di occupazione il
+          // protone sta per convenzione nel primo blocco, quindi i ket con
+          // isospin scambiato (t3=-t1) hanno l'ordinamento delle particelle
+          // invertito rispetto al bra: sono i termini di SCAMBIO e per
+          // fermioni identici entrano con il segno meno (diretto - scambio).
+          // Senza questo segno il core repulsivo a piccolo r genera un
+          // falso stato legato a ~-1000 MeV.
+         if (ketT != braT)
+            Vij = -Vij;
+          
 
           //    std::cout<<"VIJ="<<Vij.real()<<std::endl;
           // std::cout<<"parto da: ("<<SpinIndexAll[0]<<" ,
@@ -482,9 +471,8 @@ public:
                   flip = -1;
                 // ricorda che spinindexall è ordinato, quindi in 0 sempre
                 // protone e in 1 sempre neutrone
-                flipsh.push_back(
-                    {SpinIndexAll[1], SpinIndexAll[1] + (flip * nv)});
-                mel.push_back(Vij);
+                PushTerm({SpinIndexAll[1], SpinIndexAll[1] + (flip * nv)},
+                         Vij);
               }
 
               else if (s1 != s3 && s2 == s4) { // solo protone ha cambiato spin
@@ -495,9 +483,8 @@ public:
                   flip = -1;
                 // ricorda che spinindexall è ordinato, quindi in 0 sempre
                 // protone e in 1 sempre neutrone
-                flipsh.push_back(
-                    {SpinIndexAll[0], SpinIndexAll[0] + (flip * nv)});
-                mel.push_back(Vij);
+                PushTerm({SpinIndexAll[0], SpinIndexAll[0] + (flip * nv)},
+                         Vij);
 
               } else if (s1 != s3 &&
                          s2 != s4) { // entrambi hanno flippato lo spin
@@ -510,10 +497,9 @@ public:
                 if (s2 == -1)
                   flip2 = -1;
 
-                flipsh.push_back(
-                    {SpinIndexAll[0], SpinIndexAll[0] + (flip1 * nv),
-                     SpinIndexAll[1], SpinIndexAll[1] + (flip2 * nv)});
-                mel.push_back(Vij);
+                PushTerm({SpinIndexAll[0], SpinIndexAll[0] + (flip1 * nv),
+                          SpinIndexAll[1], SpinIndexAll[1] + (flip2 * nv)},
+                         Vij);
               }
 
             }
@@ -528,9 +514,9 @@ public:
               // std::cout<<"spin non cambiano ma isospin si-> flip
               // pn"<<std::endl;
 
-              flipsh.push_back({SpinIndexAll[0], SpinIndexAll[0] + (2 * nv),
-                                SpinIndexAll[1], SpinIndexAll[1] - (2 * nv)});
-              mel.push_back(Vij);
+              PushTerm({SpinIndexAll[0], SpinIndexAll[0] + (2 * nv),
+                        SpinIndexAll[1], SpinIndexAll[1] - (2 * nv)},
+                       Vij);
 
             }
 
@@ -549,10 +535,10 @@ public:
                 int flip2 = +1;
                 if (s2 == -1)
                   flip2 = -1;
-                flipsh.push_back(
+                PushTerm(
                     {SpinIndexAll[0], SpinIndexAll[0] + (2 * nv + flip1 * nv),
-                     SpinIndexAll[1], SpinIndexAll[1] - (2 * nv - flip2 * nv)});
-                mel.push_back(Vij);
+                     SpinIndexAll[1], SpinIndexAll[1] - (2 * nv - flip2 * nv)},
+                    Vij);
               }
 
               else if (s1 != s3 &&
@@ -565,11 +551,10 @@ public:
                   flip = -1;
                 // std::cout<<"protone spin down-> neutrone spin up, neutrone
                 // spin up-> protone spin up"<<std::endl;
-                flipsh.push_back({SpinIndexAll[0],
-                                  SpinIndexAll[0] + (2 * nv + flip * nv),
-                                  SpinIndexAll[1], SpinIndexAll[1] - (2 * nv)});
-
-                mel.push_back(Vij);
+                PushTerm({SpinIndexAll[0],
+                          SpinIndexAll[0] + (2 * nv + flip * nv),
+                          SpinIndexAll[1], SpinIndexAll[1] - (2 * nv)},
+                         Vij);
 
               } else if (s1 == s3 && s2 != s4) {
                 // std::cout<<"protone spin up-> neutrone spin up, neutrone spin
@@ -578,11 +563,10 @@ public:
                 if (s2 == -1)
                   flip = -1;
 
-                flipsh.push_back({SpinIndexAll[0], SpinIndexAll[0] + (2 * nv),
-                                  SpinIndexAll[1],
-                                  SpinIndexAll[1] - ((2 - flip) * nv)});
-
-                mel.push_back(Vij);
+                PushTerm({SpinIndexAll[0], SpinIndexAll[0] + (2 * nv),
+                          SpinIndexAll[1],
+                          SpinIndexAll[1] - ((2 - flip) * nv)},
+                         Vij);
               }
             }
           }
@@ -729,7 +713,7 @@ public:
     return (1.0 + 2.0 / t) * std::exp(-t) / (x * x * x);
   }
 
-  const std::vector<double> AV6operators(double r) {
+  virtual const std::vector<double> AV6operators(double r) {
 
     std::vector<double> vnn;
 
@@ -829,6 +813,17 @@ public:
     double p01cd = (0.5 * (p01pp + p01nn) - p01np) / 6;
     double p01cs = (p01pp - p01nn) / 4;
 
+    // Riduzione v8' (av18pot.f ufficiale, lpot>=2): ripiega i termini L^2 e
+    // (L.S)^2 nei canali centrale/tensore/spin-orbita. Senza questo passaggio
+    // il "v6'" NON riproduce il deutone AV18 (-2.2246 MeV).
+    p00 = p00 + 2 * pl200;
+    p11 = p11 + 2 * pl211 + 4 * pls21 / 3;
+    pt1 = pt1 - 5 * pls21 / 12;
+    pls1 = pls1 - .5 * pls21;
+    pls0 = pls0 - 2 * pl210 - 3 * pls20;
+
+    // Riduzione v6' (lpot>=3): elimina lo spin-orbita compensando sul
+    // centrale T=0 (usa il pls0 GIA' modificato dalla riduzione v8')
     p10 = p10 - .3 * pls0;
 
     vnn.push_back(0.0625 * (9 * p11 + 3 * p10 + 3 * p01 + p00));

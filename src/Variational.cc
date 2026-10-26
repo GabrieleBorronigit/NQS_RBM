@@ -1,9 +1,10 @@
 #include <iostream>
 // #include <Eigen/Dense>
 // #include <Eigen/IterativeLinearSolvers>
-#include "eigen3/Eigen/Eigenvalues"
+#include <Eigen/Eigenvalues>
 #include "mpi.h"
 #include <complex>
+#include <filesystem>
 #include <fstream>
 #include <random>
 #include <vector>
@@ -28,6 +29,8 @@ class Variational {
   double sigmaElocmean_;
   double loss_;
   int nsweeps_;
+  int sweepfactor_;
+  double mean_radius_;
   vector<complex<double>> grad_;
   vector<vector<complex<double>>> QFisher0_;
   // MatrixXcd QFisher0_;
@@ -48,6 +51,9 @@ public:
     grad_.resize(npar_);
     opt_.SetNpar(npar_);
     Iter0_ = 0;
+    sweepfactor_ = 1;
+    mean_radius_ = 0.0;
+    loss_ = 0.0;
     // QFisher0_ = new complex<double>[npar_*npar_];
   }
 
@@ -56,20 +62,30 @@ public:
     out_.close();
   }
 
+  // Campionamento per il TRAINING (SGD): il sampler accumula on-the-fly
+  // sum_k O_k e sum_k E_k O_k, cosi' NON teniamo in memoria l'intera matrice
+  // nsweeps x npar ne' copiamo history inutili. Ricava solo elocs_/elocmean_.
   void Sample() {
-    sampler_.Sample(
-        nsweeps_); // inizializza stato random, campiona configurazioni con
-                   // metropolis e calcola energia locale+Derlogs, tutto
-                   // Niter*Nsweeps volte
-    configSamp_ = sampler_.GetSamplingConfig(); // statehistory
-    indexSamp_ = sampler_.GetSamplingIndex();   // stateindexhistory
+    sampler_.SetStoreFull(false);
+    sampler_.Sample(nsweeps_, 0.6, sweepfactor_);
     elocs_.resize(nsweeps_);
-    realPart(sampler_.GetSamplingEnergies(),
-             elocs_); // prendo solo la parte reale di Eloc, in teoria la parte
-                      // immaginaria dovrebbe mediare a zero
-    elocmean_ = accumulate(elocs_.begin(), elocs_.end(), 0.0) /
-                elocs_.size();        // media di Eloc
-    derLogs_ = sampler_.GetDerLogs(); // salvo derlogs
+    realPart(sampler_.GetSamplingEnergies(), elocs_);
+    elocmean_ =
+        accumulate(elocs_.begin(), elocs_.end(), 0.0) / elocs_.size();
+  }
+
+  // Campionamento COMPLETO (pretraining e SR): serve la matrice per-campione
+  // (derLogs_) e le history delle configurazioni. Comportamento originale.
+  void SampleFull() {
+    sampler_.SetStoreFull(true);
+    sampler_.Sample(nsweeps_, 0.6, sweepfactor_);
+    configSamp_ = sampler_.GetSamplingConfig();
+    indexSamp_ = sampler_.GetSamplingIndex();
+    elocs_.resize(nsweeps_);
+    realPart(sampler_.GetSamplingEnergies(), elocs_);
+    elocmean_ =
+        accumulate(elocs_.begin(), elocs_.end(), 0.0) / elocs_.size();
+    derLogs_ = sampler_.GetDerLogs();
   }
 
   void CalcSigmaElocmean(int bins = 50) {
@@ -161,14 +177,18 @@ public:
     } */
 
   inline complex<double> PhiTarget(vector<int> stateIndex) { // 2p1d GS
-    int nv;
-    nv = nqs_.Nspins();
-    complex<double> phi;
-    phi = 1 / sqrt(2) *
-          (sin(complex<double>(M_PI * (stateIndex[0] + 0.5) / nv, 0)) *
-               sin(complex<double>(M_PI * (stateIndex[1] + 0.5) / nv, 0)) -
-           sin(complex<double>(M_PI * (stateIndex[0] + 0.5) / nv, 0)) *
-               sin(complex<double>(M_PI * (stateIndex[1] + 0.5) / nv, 0)));
+    int nv = nqs_.Nspins();
+    if (stateIndex.size() == 1) { // una particella: GS della buca
+      return sin(complex<double>(M_PI * (stateIndex[0] + 0.5) / nv, 0));
+    }
+    // due fermioni identici: determinante di Slater dei modi n=1 e n=2
+    // (prima i due termini erano identici e phi risultava sempre 0)
+    complex<double> phi =
+        1 / sqrt(2) *
+        (sin(complex<double>(M_PI * (stateIndex[0] + 0.5) / nv, 0)) *
+             sin(complex<double>(2 * M_PI * (stateIndex[1] + 0.5) / nv, 0)) -
+         sin(complex<double>(2 * M_PI * (stateIndex[0] + 0.5) / nv, 0)) *
+             sin(complex<double>(M_PI * (stateIndex[1] + 0.5) / nv, 0)));
     return phi;
   }
 
@@ -198,26 +218,30 @@ public:
     }
   }
 
+  // Gradiente stocastico dagli accumulatori del sampler. Identico a
+  //   grad[j] = (2/N) sum_i (E_i - <E>) conj(O_i[j])
+  // riscritto come  (2/N) ( sumEDer[j] - <E> conj(sumDer[j]) ),  dove
+  // sumEDer accumula E_k*conj(O_k) con E_k COMPLESSA,
+  // con E_i reali: matematicamente equivalente, ma senza tenere in RAM la
+  // matrice nsweeps x npar.
   void TrainingGradient() {
-    // CalcDerLogs();
-    for (int i = 0; i < npar_; i++)
-      grad_[i] = 0.; // predispongo il vettore contenente le derivate lungo ogni
-                     // direzione
-
-    for (int i = 0; i < nsweeps_; i++) { // cicla su ogni configurazione
-                                         // generata
-      complex<double> targetDistance = elocs_[i] - elocmean_;
-
-      for (int j = 0; j < npar_; j++) {
-        if (std::isnan(derLogs_[i][j].real()) ||
-            std::isnan(derLogs_[i][j].imag())) {
-          std::cerr << "NAN in derLogs! iter " << i << " par " << j
-                    << std::endl;
-        }
-
-        grad_[j] +=
-            targetDistance * conj(derLogs_[i][j]) * 2. / double(nsweeps_);
-      } // calcolo gradiente stocastico
+    const long N = sampler_.GetNAccum();
+    const auto &sumDer = sampler_.GetSumDer();
+    const auto &sumEDer = sampler_.GetSumEDer();
+    if (N <= 0 || (int)sumDer.size() != npar_) {
+      std::cerr << "TrainingGradient: accumulatori vuoti/incoerenti (N=" << N
+                << ", size=" << sumDer.size() << ")" << std::endl;
+      for (int j = 0; j < npar_; j++)
+        grad_[j] = 0.;
+      return;
+    }
+    const double invN = 1.0 / double(N);
+    for (int j = 0; j < npar_; j++) {
+      if (std::isnan(sumEDer[j].real()) || std::isnan(sumDer[j].real())) {
+        std::cerr << "NAN in accumulatori gradiente! par " << j << std::endl;
+      }
+      grad_[j] =
+          2.0 * invN * (sumEDer[j] - elocmean_ * conj(sumDer[j]));
     }
   }
 
@@ -225,7 +249,7 @@ public:
     nsweeps_ = nsweeps;
     SetOutputFilePretraining();
     for (int i = 0; i < niter; i++) {
-      Sample();
+      SampleFull(); // pretraining: serve la matrice per-campione
 
       PretrainingGradient();
 
@@ -249,7 +273,7 @@ public:
     nsweeps_ = nsweeps;
     SetOutputFilePretraining();
     for (int i = 0; i < niter; i++) {
-      Sample();
+      SampleFull(); // pretraining+SR: serve la matrice per-campione
 
       PretrainingGradient();
       CalcQuantumFisher();
@@ -283,13 +307,15 @@ public:
   }*/
   void RunTraining(int nsweeps, int niter, int loadtype = 0, int nprint = 2000,
                    std::string label = "H2",
-                   std::string trainingfn = "Training.dat") {
+                   std::string trainingfn = "TrainingH2.dat") {
 
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    nsweeps_ = nsweeps;                // salva numero di sweeps
+    nsweeps_ = nsweeps; // salva numero di sweeps
+    // increase MC attempts per sweep: sweepfactor multiplies nspins
+    sweepfactor_ = 4; // increase this if you want more moves per MC step
     SetOutputFileTraining(trainingfn); // predispone il file su cui stampare
                                        // iterazione corrente, Eloc, sigma, loss
     if (rank == 0) {
@@ -310,9 +336,15 @@ public:
         Sample();
       }*/
     }
-    std::ofstream outeta("SamplingTest/LR" + label + ".dat");
-    std::ofstream outacc("SamplingTest/Acceptance" + label + ".dat");
-    outacc << "i" << setw(12) << "acc" << std::endl;
+    // solo il master apre/scrive: piu' stream aperti in troncamento sullo
+    // stesso file da rank diversi si azzerano a vicenda
+    std::ofstream outeta, outacc;
+    if (rank == 0) {
+      std::filesystem::create_directories("SamplingTest");
+      outeta.open("SamplingTest/LR" + label + ".dat");
+      outacc.open("SamplingTest/Acceptance" + label + ".dat");
+      outacc << "i" << setw(12) << "acc" << std::endl;
+    }
 
     for (int i = 0; i < niter; i++) { // ciclo sul numero di iterazioni
 
@@ -387,13 +419,13 @@ public:
       if ((i + 1) % nprint == 0) {
         SetupReset(i, label);
       }
-      outacc << i << setw(12) << sampler_.Acceptance() << std::endl;
-      if (rank == 0)
+      if (rank == 0) {
+        outacc << i << setw(12) << sampler_.Acceptance() << std::endl;
         outeta << i << setw(12) << opt_.GetEta() << std::endl;
+      }
     }
     outacc.close();
     outeta.close();
-    PrintStats(Iter0_ + niter);
     Iter0_ += niter;
   }
 
@@ -449,20 +481,33 @@ public:
     Iter0_+=niter;
   }*/
 
-  void RunTrainingSR(int nsweeps, int niter, int nprint = 3000) {
+  void RunTrainingSR(int nsweeps, int niter, int loadtype = 0,
+                     int nprint = 3000, std::string label = "H2",
+                     std::string trainingfn = "TrainingH2.dat") {
 
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     nsweeps_ = nsweeps;
-    SetOutputFileTraining("TrainingTest/TrainingSR.dat");
+    SetOutputFileTraining(trainingfn);
+
     if (rank == 0) {
       sampler_.SetFileStates("configuration_SR.dat");
     }
+
+    // solo il master apre/scrive (vedi RunTraining)
+    std::ofstream outeta, outacc;
+    if (rank == 0) {
+      std::filesystem::create_directories("SamplingTest");
+      outeta.open("SamplingTest/LR" + label + ".dat");
+      outacc.open("SamplingTest/Acceptance" + label + ".dat");
+      outacc << "i" << setw(12) << "acc" << std::endl;
+    }
+
     for (int i = 0; i < niter; i++) {
 
-      Sample();
+      SampleFull(); // SR: CalcQuantumFisher ha bisogno delle derLogs complete
 
       // 1. Calcola la somma delle energie usando MPI_Allreduce
       double sum_energies = 0.0;
@@ -488,6 +533,7 @@ public:
       // 4. Update the local energy with the averaged energy
       elocmean_ = avg_energy;
       sigmaElocmean_ = std_err;
+      // --- gather mean radius from sampler (MPI reduction) ---
 
       TrainingGradient(); // calcola i gradienti stocastici lungo ogni parametro
 
@@ -556,12 +602,17 @@ public:
       if (((i + 1) % 50) == 0) {
         CheckParametersConsistency();
       }
-      if (i % nprint) {
-        SetupReset(i);
+      if ((i + 1) % nprint == 0) { // prima era if(i % nprint): salvava il
+                                   // checkpoint a ogni iter TRANNE i multipli
+        SetupReset(i, label);
+      }
+      if (rank == 0) {
+        outacc << i << setw(12) << sampler_.Acceptance() << std::endl;
+        outeta << i << setw(12) << opt_.GetEta() << std::endl;
       }
     }
-
-    PrintStats(Iter0_ + niter);
+    outacc.close();
+    outeta.close();
     Iter0_ += niter;
   }
 
@@ -580,6 +631,11 @@ public:
   }
 
   void SetOutputFilePretraining() {
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank != 0) // un solo stream sul file: altri rank lo troncherebbero
+      return;
+    std::filesystem::create_directories("TrainingTest");
     out_.open("TrainingTest/Pretraining.dat", std::ios_base::out);
     if (!out_.is_open()) {
       std::cerr << "# Error : Cannot open file for writing optimization data"
@@ -599,6 +655,10 @@ public:
   void SetOutputFileTraining(
       std::string outputfile) { // predispone il file su cui stampare iterazione
                                 // corrente, Eloc, sigma, loss
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank != 0) // un solo stream sul file: altri rank lo troncherebbero
+      return;
     out_.open(outputfile.c_str(), std::ios_base::out);
     if (!out_.is_open()) {
       std::cerr << "# Error : Cannot open file for writing optimization data"
@@ -606,10 +666,7 @@ public:
       std::abort();
     }
     out_ << "Niter" << "\t" << "Eloc" << "\t" << "sigma" << "\t" << "loss"
-         << "\t";
-    // for (int i = 0; i < npar_; i++)
-    // out_ << "par" << i << "\t";
-    // out_ << endl;
+         << "\t" << "mean_radius" << endl;
 
     std::cout << "# Saving sampled configuration to file " << outputfile.c_str()
               << std::endl;
@@ -624,7 +681,8 @@ public:
 
     if (rank == 0) {
       out_ << i + Iter0_ << "\t" << scientific << elocmean_ << "\t"
-           << sigmaElocmean_ << "\t"; // << loss_ << "\t";
+           << sigmaElocmean_ << "\t" << mean_radius_
+           << "\t"; // << loss_ << "\t";
       auto pars = nqs_.GetParameters();
       /*  for (const auto &par : pars) {
           out_ << "(" << par.real();
@@ -651,9 +709,18 @@ public:
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
-    std::ofstream out("TrainingTest/weights" + label + std::to_string(N) +
-                      ".dat");
-    if (rank == 0) {
+    // solo il master scrive il checkpoint: se anche gli altri rank aprissero
+    // lo stesso file in troncamento potrebbero azzerarlo dopo la scrittura
+    if (rank != 0)
+      return;
+    std::filesystem::create_directories("TrainingTest");
+    std::ofstream out("TrainingTest/weights" + label + ".dat");
+    if (!out.is_open()) {
+      std::cerr << "# Error : Cannot open checkpoint file TrainingTest/weights"
+                << label << ".dat" << std::endl;
+      return;
+    }
+    {
 
       out << nqs_.Nspins() << std::endl;  // nv
       out << nqs_.NHspins() << std::endl; // nh

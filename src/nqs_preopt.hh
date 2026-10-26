@@ -24,12 +24,12 @@ All use of these programs is entirely at the user's own risk.
 */
 
 #include <string>
-#include "readoptions.cc"
+#include "ReadOptions.cc"
 #include "nqs.cc"
 //#include "ising1d.cc"
 //#include "heisenberg1d.cc"
 //#include "heisenberg2d.cc"
-#include "sampler.cc"
+#include "Sampler.cc"
 
 #include "Trap1d.cc"
 #include "Trap3d.cc"
@@ -37,7 +37,7 @@ All use of these programs is entirely at the user's own risk.
 #include "Variational.cc"
 
 //#include "SgdNorm.cc"
-#include "SR.cc"
+//#include "SR.cc"
 
 #include "Coulomb1d.cc"
 #include "Coulomb3d.cc"

@@ -1,4 +1,4 @@
-#include "eigen3/Eigen/Eigenvalues"
+#include <Eigen/Eigenvalues>
 #include <cassert>
 #include <cmath>
 #include <complex>
@@ -206,6 +206,6 @@ public:
 
   // void Reset(){
   // }
-  double GetEta() { return eta_; }
-  int GetNiter() { return niter_; }
+  double GetEta(){return eta_;}
+  int GetNiter(){return niter_;}
 };

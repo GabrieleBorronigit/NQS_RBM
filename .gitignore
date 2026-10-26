@@ -1,0 +1,21 @@
+# compiled programs
+optH2
+Energy
+diagH2kron
+Wfplotter
+*.o
+
+# simulation output
+Configuration.dat
+Training*.dat
+weights*.dat
+Energy*.dat
+positions*.dat
+SamplingTest/*
+TrainingTest/*
+!SamplingTest/.gitkeep
+!TrainingTest/.gitkeep
+
+# editor / os
+.DS_Store
+.vscode/
