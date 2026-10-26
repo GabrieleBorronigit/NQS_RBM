@@ -3,7 +3,7 @@ nh          10
 sigma       0.02
 loadtype    0
 restartfn   weightsnv13nh10tl5.dat
-model       ArgonneV6Lattice
+model       ArgonneV6
 M           2
 spin_up     1
 spin_down   1
@@ -27,4 +27,3 @@ cg_lambda   0.1
 cg_rtol     1e-4
 cg_maxiter  100
 cg_maxstep  1.0
-smear_b_factor 1.0

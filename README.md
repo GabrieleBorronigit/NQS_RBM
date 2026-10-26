@@ -28,10 +28,7 @@ The spin down electron is much more localized near the nucleus, since it always 
 
 ## Deuteron
 
-For the deuteron the proton and the neutron live in a box with the center of mass fixed in the middle (default 9x9x9 sites), and each site has four channels: p↑, p↓, n↑, n↓. There are two versions of the potential:
-
-- `ArgonneV6`: the AV6' potential evaluated directly on the lattice.
-- `ArgonneV6Lattice`: AV6' smoothed with a gaussian regulator and recalibrated so that the exact ground state on the same lattice reproduces the deuteron binding energy (-2.2246 MeV).
+For the deuteron the proton and the neutron live in a box with the center of mass fixed in the middle (default 9x9x9 sites), each site has four channels (p↑, p↓, n↑, n↓) and the interaction is the AV6' potential evaluated on the lattice.
 
 The network can be trained with plain SGD or with a natural gradient (stochastic reconfiguration) where the linear system is solved with conjugate gradient, so that the Fisher matrix never has to be stored.
 
@@ -70,7 +67,7 @@ sigma       std deviation of the gaussian initializer for the weights
 loadtype    0: random weights, 1: visible from file, random hidden,
             2: all weights loaded from file, 3: all weights from file + new random hidden
 restartfn   file containing the weights to load
-model       ArgonneV6 / ArgonneV6Lattice
+model       ArgonneV6
 M           number of particles
 spin_up     spin up particles
 spin_down   spin down particles
@@ -96,7 +93,6 @@ cg_lambda       relative regularization of the Fisher matrix
 cg_rtol         tolerance of the conjugate gradient
 cg_maxiter      max conjugate gradient iterations
 cg_maxstep      max size of a parameter update
-smear_b_factor  width of the gaussian regulator in units of the lattice spacing (ArgonneV6Lattice)
 ```
 
 ## Notes

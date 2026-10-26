@@ -461,10 +461,6 @@ ReadOptionsFromFile(std::string filename) {
       std::string fn;
       in >> fn;
       options["trainingfn"] = fn;
-    } else if (property == "smear_b_factor") { // larghezza regolatore AV6Lattice, in unita' di dx
-      double x = 0;
-      in >> x;
-      options["smear_b_factor"] = x;
     }
 
     else {
